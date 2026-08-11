@@ -15,15 +15,7 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
 
     try:
         log(f"Starting conversion for book ID: {book_id} (Quality: {audio_quality})")
-        
-        # Map quality string to Edge TTS format
-        # Note: Microsoft Edge TTS is very picky about formats for neural voices.
-        # Standard: audio-24khz-48kbitrate-mono-mp3 (48kbps)
-        # High: audio-24khz-96kbitrate-mono-mp3 (96kbps)
-        audio_fmt = "audio-24khz-48kbitrate-mono-mp3" 
-        if audio_quality == 'High':
-            audio_fmt = "audio-24khz-96kbitrate-mono-mp3"
-        
+
         # 1. Extract text
         notifications.put((0.05, "Extracting text..."))
         text = extract_content_robust(epub_path, log)
@@ -59,7 +51,7 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
                         data = b""
                         if engine == 'Edge TTS':
                             import edge_tts
-                            communicate = edge_tts.Communicate(chunk_text, voice, audio_format=audio_fmt)
+                            communicate = edge_tts.Communicate(chunk_text, voice)
                             async for message in communicate.stream():
                                 if message["type"] == "audio":
                                     data += message["data"]
@@ -110,10 +102,14 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
                             def run_gtts():
                                 import tempfile
                                 tts = gTTS(text=chunk_text, lang=lang_code)
-                                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=True) as tf:
-                                    tts.save(tf.name)
-                                    with open(tf.name, "rb") as rf:
+                                fd, path = tempfile.mkstemp(suffix='.mp3')
+                                os.close(fd)
+                                try:
+                                    tts.save(path)
+                                    with open(path, "rb") as rf:
                                         return rf.read()
+                                finally:
+                                    os.unlink(path)
                             
                             data = await asyncio.get_event_loop().run_in_executor(None, run_gtts)
                             await asyncio.sleep(0.5) # Rate limit safety
@@ -124,6 +120,16 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
                                          f"Downloaded {completed[0]} of {total_chunks} segments..."))
                     except Exception as e:
                         log(f"Error in chunk {index}: {str(e)}")
+
+            if engine == 'VibeVoice':
+                try:
+                    import torch, transformers
+                except ImportError:
+                    log("ERROR: VibeVoice requires 'torch' and 'transformers', which are not bundled with "
+                        "this plugin (they are multi-GB, platform-specific packages). Install them into "
+                        "Calibre's own Python environment, then retry. See the plugin README for install "
+                        "instructions.")
+                    return
 
             # Create tasks
             tasks = [fetch_chunk(i, chunk) for i, chunk in enumerate(text_chunks)]

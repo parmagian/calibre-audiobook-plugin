@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-08-11
+### Fixed
+- Edge TTS: removed an `audio_format` argument no longer accepted by the vendored edge-tts library, which was crashing every chunk.
+- gTTS: fixed a Windows-only `PermissionError` caused by writing to a temp file while still holding it open.
+- VibeVoice: missing `torch`/`transformers` now produce a single clear error explaining they must be installed separately, instead of five duplicate per-chunk failures.
+
 ## [0.2.0] - 2026-04-29
 ### Added
 - Microsoft VibeVoice as an additional TTS engine option (local model, requires manual download).
