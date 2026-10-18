@@ -96,7 +96,7 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
 
         warning = None
         if failed:
-            warning = f"{failed} parts are missing ({first_error}). Run again to fill them."
+            warning = f"{failed} parts are missing, so the audio skips there ({first_error})."
             log(f"WARNING: {warning}")
         log("SUCCESS: Generation finished.")
         return True, (book_id, output_format, output_path, warning)
@@ -121,7 +121,8 @@ def audio_seconds(ffmpeg, path):
 
 STATS_COLUMNS = ['started', 'finished', 'status', 'title', 'author', 'engine', 'voice', 'language', 'format',
                  'chapters', 'characters', 'audio_hours', 'minutes_taken', 'estimated_minutes', 'cost',
-                 'estimated_cost', 'pieces', 'retries', 'missing_parts', 'file_mb', 'saved_to', 'error']
+                 'estimated_cost', 'pieces', 'retries', 'missing_parts', 'fallback_parts', 'file_mb', 'saved_to',
+                 'error']
 
 
 def append_stats(path, row):
@@ -190,6 +191,15 @@ class FatalTTSError(Exception):
     """Errors that retrying can't fix (bad API key, no credits): stop the whole job."""
 
 
+class ContentBlocked(Exception):
+    """The provider's safety filter refused this text. It will refuse it again, so don't retry."""
+
+
+# Kokoro voice that reads a sentence Gemini's safety filter refuses, by Gemini voice
+FALLBACK_VOICES = {'Sulafat': 'af_heart', 'Achird': 'am_michael'}
+SENTENCE_PAUSE = 0.2
+
+
 def openrouter_speech(text, voice, api_key, model=CLOUD_MODELS['Kokoro Cloud'][0]):
     """A speech model on OpenRouter. Returns (raw 16-bit mono PCM bytes, sample_rate)."""
     import urllib.request
@@ -206,6 +216,8 @@ def openrouter_speech(text, voice, api_key, model=CLOUD_MODELS['Kokoro Cloud'][0
         detail = e.read().decode('utf-8', 'replace')[:300]
         if e.code in (401, 402, 403):
             raise FatalTTSError(f"OpenRouter said {e.code} (check your API key and credits): {detail}")
+        if 'moderation' in detail or 'SAFETY' in detail:
+            raise ContentBlocked(detail)
         raise RuntimeError(f"OpenRouter error {e.code}: {detail}")
 
 
@@ -231,16 +243,35 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
     fatal = []
     completed = [0]
     retries = [0]
+    fallbacks = [0]
     sample_rate = [24000]
     started = time.time()
 
+    async def cloud_call(text, use_voice, use_model):
+        # Hard deadline: a slowly trickling response can dodge urllib's per-read timeout.
+        # A timed-out thread keeps running until its socket gives up, hence the roomy pool.
+        data, sample_rate[0] = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(
+            cloud_pool, openrouter_speech, text, use_voice, api_key, use_model), CLOUD_TIMEOUT)
+        return data
+
+    async def rescue_blocked(chunk_text, index):
+        """Safety filter refused a piece: retry it sentence by sentence, and have Kokoro read
+        only the sentences that are still refused, so the book has no gap."""
+        silence = b'\x00\x00' * int(sample_rate[0] * SENTENCE_PAUSE)
+        audio = []
+        for sentence in split_sentences(chunk_text):
+            try:
+                audio.append(await cloud_call(sentence, voice, model))
+            except ContentBlocked:
+                log(f"Chunk {index}: safety filter refused {sentence[:60]!r}..., Kokoro reads it instead")
+                audio.append(await cloud_call(sentence, FALLBACK_VOICES.get(voice, 'af_heart'),
+                                              CLOUD_MODELS['Kokoro Cloud'][0]))
+                fallbacks[0] += 1
+        return silence.join(audio)
+
     async def synthesize(chunk_text):
         if cloud:
-            # Hard deadline: a slowly trickling response can dodge urllib's per-read timeout.
-            # A timed-out thread keeps running until its socket gives up, hence the roomy pool.
-            data, sample_rate[0] = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(
-                cloud_pool, openrouter_speech, chunk_text, voice, api_key, model), CLOUD_TIMEOUT)
-            return data
+            return await cloud_call(chunk_text, voice, model)
         if engine == 'Edge TTS':
             import edge_tts
             data = b""
@@ -269,7 +300,10 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
                 if abort.is_set() or fatal:
                     return
                 try:
-                    data = await synthesize(chunk_text)
+                    try:
+                        data = await synthesize(chunk_text)
+                    except ContentBlocked:
+                        data = await rescue_blocked(chunk_text, index)
                     if not data:
                         raise RuntimeError("no audio received")
                     results[index] = data
@@ -309,7 +343,7 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
 
     if stats is not None:
         # Only pieces that came back count toward cost
-        stats.update(pieces=total, retries=retries[0], missing_parts=total - completed[0],
+        stats.update(pieces=total, retries=retries[0], missing_parts=total - completed[0], fallback_parts=fallbacks[0],
                      chars_sent=sum(len(chunk) for i, (_, chunk, _) in enumerate(jobs) if results[i]))
     if fatal:
         return [], 0, fatal[0]
@@ -423,12 +457,17 @@ def unique_path(folder, base, ext):
     return path
 
 
+def split_sentences(text):
+    """A sentence ends at . ! ? plus any closing quote/bracket, followed by space or end."""
+    return [s.strip() for s in re.findall(r'.+?(?:[.!?]+["\')\]]*(?=\s|$)|$)', text.strip(), re.S) if s.strip()]
+
+
 def split_into_chunks(text, limit):
     """Packs whole sentences into chunks of at most `limit` chars, never cutting mid-word."""
     chunks, current = [], ""
     for para in text.split('\n\n'):
         # A sentence ends at . ! ? plus any closing quote/bracket, followed by space or end
-        for sentence in re.findall(r'.+?(?:[.!?]+["\')\]]*(?=\s|$)|$)', para.strip()):
+        for sentence in split_sentences(para):
             for piece in _split_long(sentence.strip(), limit):
                 if current and len(current) + 1 + len(piece) > limit:
                     chunks.append(current.strip())

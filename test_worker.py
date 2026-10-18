@@ -97,6 +97,24 @@ def test_kokoro_cloud():
             assert set(models) == {'google/gemini-3.8-flash-tts'}, models
             assert all(len(c) <= 400 for c in calls) and len(calls) > 3
 
+        # A sentence the safety filter refuses is read by Kokoro instead, with no retries and no gap
+        calls.clear(); models.clear()
+        def picky(text, voice, key, model='hexgrad/kokoro-82m'):
+            if 'gemini' in model and 'naked' in text:
+                raise worker.ContentBlocked('SAFETY')
+            return fake_speech(text, voice, key, model)
+        worker.openrouter_speech = picky
+        blocked = [('One', 'Tykes played by the trees. Their naked bodies were muddy. She smiled.')]
+        with tempfile.TemporaryDirectory() as d:
+            stats = {}
+            parts, failed, _ = worker.run_online_tts(blocked, 'Sulafat', 'Gemini Flash', 'en', None, d,
+                                                     Q(), threading.Event(), lambda m: None, 'key', stats)
+            assert failed == 0 and len(parts) == 1 and stats['fallback_parts'] == 1, stats
+            assert stats['retries'] == 0 and stats['missing_parts'] == 0, stats
+            # Only the middle sentence switches voice
+            assert models == ['google/gemini-3.8-flash-tts', 'hexgrad/kokoro-82m', 'google/gemini-3.8-flash-tts'], models
+        worker.openrouter_speech = fake_speech
+
         # A bad key stops the job instead of retrying every chunk
         def bad_key(*a):
             raise worker.FatalTTSError('401')
