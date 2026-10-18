@@ -70,15 +70,18 @@ def test_kokoro_cloud():
     real = worker.openrouter_speech
     worker.openrouter_speech = fake_speech
     try:
-        chapters = [('One', 'First para. Second sentence.\n\nSecond para.'), ('Two', 'Only para.')]
+        long_para = ' '.join(f'This is sentence number {i} of a long paragraph.' for i in range(50))  # > CLOUD_CHUNK_SIZE
+        chapters = [('One', f'First para. Second sentence.\n\n{long_para}'), ('Two', 'Only para.')]
         with tempfile.TemporaryDirectory() as d:
             parts, failed, err = worker.run_online_tts(chapters, 'af_heart', 'Kokoro Cloud', 'en-us', None, d,
                                                        Q(), threading.Event(), lambda m: None, 'key')
             assert failed == 0 and [t for _, t in parts] == ['One', 'Two'], (failed, err)
+            assert all(len(c) <= worker.CLOUD_CHUNK_SIZE for c in calls)
             with wave.open(parts[0][0]) as w:
                 seconds = w.getnframes() / w.getframerate()
-            # 2 chunks + 2 paragraph pauses + chapter pause
-            assert abs(seconds - (0.2 + 2 * worker.PARAGRAPH_PAUSE + worker.CHAPTER_PAUSE)) < 0.01, seconds
+            # 2 big chunks; only the last one ends a paragraph, then the chapter pause
+            assert len(calls) == 3, len(calls)
+            assert abs(seconds - (0.2 + worker.PARAGRAPH_PAUSE + worker.CHAPTER_PAUSE)) < 0.01, seconds
 
         # A bad key stops the job instead of retrying every chunk
         def bad_key(*a):
@@ -92,6 +95,27 @@ def test_kokoro_cloud():
                                      lambda m: None, '')[2].startswith('No OpenRouter API key')
     finally:
         worker.openrouter_speech = real
+
+
+def test_estimate():
+    e = worker.estimate_job(1_000_000, 'Kokoro Cloud')
+    assert abs(e['cost_low'] - 4.0) < 1e-9 and abs(e['cost_high'] - 4.4) < 1e-9
+    assert worker.estimate_job(1_000_000, 'Kokoro')['cost_high'] == 0
+    assert '$1.92 to $2.11' in worker.describe_estimate(480_000, 'Kokoro Cloud')
+    assert 'Free' in worker.describe_estimate(480_000, 'Edge TTS')
+    import datetime
+    at_3pm = datetime.datetime(2026, 10, 18, 15, 0)
+    text = worker.describe_estimate(266_345, 'Kokoro Cloud', now=at_3pm)
+    assert '27 min (done around 3:27 PM)' in text, text
+    late = worker.describe_estimate(266_345, 'Kokoro', now=datetime.datetime(2026, 10, 18, 23, 30))
+    assert 'tomorrow' in late, late
+
+
+def test_time_left():
+    # 40 of 190 done in 10 minutes -> 150 left at 4 per minute = ~38 min
+    assert worker.time_left(0, 40, 190, now=600) == ' - about 38 min left'
+    assert worker.time_left(0, 0, 190, now=600) == '...'
+    assert worker.time_left(0, 10, 1000, now=600) == ' - about 16.5 hours left'
 
 
 if __name__ == '__main__':

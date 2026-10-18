@@ -31,9 +31,6 @@ VOICE_MAPPING = {
                 'kokoro': {'Male': 'im_nicola', 'Female': 'if_sara'}, 'kokoro_lang': 'it'},
 }
 
-# Rough generation speed, for the time estimate
-CHARS_PER_MINUTE = {'Kokoro': 4000, 'Kokoro Cloud': 30000, 'Edge TTS': 40000, 'gTTS': 20000}
-
 # Global reference to the plugin instance for the config dialog
 _plugin_instance = None
 
@@ -122,13 +119,12 @@ class InterfacePlugin(InterfaceAction):
 
         if epub_path and os.path.exists(epub_path):
             try:
-                from calibre_plugins.audiobook_generator.worker import extract_chapters
+                from calibre_plugins.audiobook_generator.worker import extract_chapters, describe_estimate
                 author = mi.authors[0] if mi.authors else ''
                 chapters = extract_chapters(epub_path, 'en', {'title': title, 'author': author})
                 chars = sum(len(t) for _, t in chapters)
-                minutes = max(1, int(chars / CHARS_PER_MINUTE.get(engine, 2000)))
                 est_message = (f"{len(chapters)} chapters (front and back matter skipped).\n"
-                               f"Estimated time: ~{minutes} minutes.")
+                               + describe_estimate(chars, engine))
             except:
                 est_message = "Estimation unavailable."
 

@@ -5,12 +5,17 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 import traceback
 import re
 import unicodedata
 
 EDGE_CHUNK_SIZE = 2500
 KOKORO_CHUNK_SIZE = 400
+# OpenRouter takes ~40 s per request whatever the length, so send big pieces
+CLOUD_CHUNK_SIZE = 1600
+CLOUD_TIMEOUT = 240  # requests can sit in OpenRouter's queue for a few minutes
+CLOUD_CONCURRENCY = 6  # 6 x 1600 chars worked; 16 at once just queued and timed out
 RETRY_DELAYS = (1, 3, 9)
 PARAGRAPH_PAUSE, CHAPTER_PAUSE = 0.4, 1.5  # seconds, same as kokoro_helper.py
 OPENROUTER_URL = 'https://openrouter.ai/api/v1/audio/speech'
@@ -104,6 +109,7 @@ def run_kokoro(chapters, voice, lang_code, helper_src, workdir, notifications, a
     env = {k: v for k, v in os.environ.items() if not k.startswith('PYTHON')}
     stderr_path = os.path.join(workdir, 'stderr.txt')
     notifications.put((0.03, "Starting Kokoro (first run downloads ~350 MB)..."))
+    started = None
     with open(stderr_path, 'w') as stderr:
         proc = subprocess.Popen([uv, 'run', '--quiet', '--script', helper_path, job_path, workdir],
                                 stdout=subprocess.PIPE, stderr=stderr, text=True, env=env, cwd=workdir)
@@ -113,7 +119,10 @@ def run_kokoro(chapters, voice, lang_code, helper_src, workdir, notifications, a
                 break
             if line.startswith('PROGRESS'):
                 done, total = map(int, line.split()[1:3])
-                notifications.put((0.05 + 0.9 * done / total, f"Spoke {done} of {total} parts..."))
+                if started is None:  # time from the first part, so model loading doesn't skew it
+                    started = (time.time(), done)
+                left = time_left(started[0], done - started[1], total - started[1])
+                notifications.put((0.05 + 0.9 * done / total, f"Spoke {done} of {total} parts{left}"))
             elif line.startswith('STATUS'):
                 notifications.put((0.04, line[7:].strip()))
         proc.wait()
@@ -140,7 +149,7 @@ def openrouter_speech(text, voice, api_key):
     req = urllib.request.Request(OPENROUTER_URL, data=body.encode('utf-8'), method='POST',
                                  headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'})
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=CLOUD_TIMEOUT) as resp:
             rate = re.search(r'rate=(\d+)', resp.headers.get('Content-Type', ''))
             data = resp.read()
             return data[:len(data) // 2 * 2], int(rate.group(1)) if rate else 24000
@@ -156,14 +165,14 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
     cloud = engine == 'Kokoro Cloud'
     if cloud and not api_key:
         return [], 0, "No OpenRouter API key. Add it in the plugin settings."
-    # (chapter index, text, ends a paragraph). Kokoro takes short chunks inside one paragraph.
-    if cloud:
-        jobs = [(ci, chunk, i == len(chunks) - 1) for ci, (_, text) in enumerate(chapters)
-                for para in text.split('\n\n') for chunks in [split_into_chunks(para, KOKORO_CHUNK_SIZE)]
-                for i, chunk in enumerate(chunks)]
-    else:
-        jobs = [(ci, chunk, False) for ci, (_, text) in enumerate(chapters)
-                for chunk in split_into_chunks(text, EDGE_CHUNK_SIZE)]
+    # (chapter index, text, add a pause after it). Cloud pieces hold several paragraphs, so the
+    # pause only goes after a piece that ends a paragraph.
+    size = CLOUD_CHUNK_SIZE if cloud else EDGE_CHUNK_SIZE
+    jobs = []
+    for ci, (_, text) in enumerate(chapters):
+        paragraph_ends = {p.strip()[-40:] for p in text.split('\n\n') if p.strip()}
+        for chunk in split_into_chunks(text, size):
+            jobs.append((ci, chunk, cloud and any(chunk.endswith(e) for e in paragraph_ends)))
     total = len(jobs)
     log(f"Total chunks: {total}")
     results = [None] * total
@@ -171,11 +180,14 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
     fatal = []
     completed = [0]
     sample_rate = [24000]
+    started = time.time()
 
     async def synthesize(chunk_text):
         if cloud:
-            data, sample_rate[0] = await asyncio.get_event_loop().run_in_executor(
-                None, openrouter_speech, chunk_text, voice, api_key)
+            # Hard deadline: a slowly trickling response can dodge urllib's per-read timeout.
+            # A timed-out thread keeps running until its socket gives up, hence the roomy pool.
+            data, sample_rate[0] = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(
+                cloud_pool, openrouter_speech, chunk_text, voice, api_key), CLOUD_TIMEOUT)
             return data
         if engine == 'Edge TTS':
             import edge_tts
@@ -211,31 +223,36 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
                     results[index] = data
                     completed[0] += 1
                     notifications.put((0.05 + 0.9 * completed[0] / total,
-                                       f"Downloaded {completed[0]} of {total} segments..."))
+                                       f"Downloaded {completed[0]} of {total} segments"
+                                       + time_left(started, completed[0], total)))
                     return
                 except FatalTTSError as e:
                     log(f"Error in chunk {index}, stopping: {e}")
                     fatal.append(str(e))
                     return
                 except Exception as e:
-                    msg = str(e) or type(e).__name__
+                    msg = str(e).strip() or type(e).__name__
                     if delay is None:
-                        log(f"Error in chunk {index} (gave up): {msg}")
+                        log(f"Error in chunk {index} (gave up): {e!r}")
                         errors.append(msg)
                         return
-                    log(f"Error in chunk {index} (attempt {attempt + 1}, retrying): {msg}")
+                    log(f"Error in chunk {index} (attempt {attempt + 1}, retrying): {e!r}")
                     await asyncio.sleep(delay)
 
     async def run_all():
         # Limit concurrency to avoid getting blocked
-        semaphore = asyncio.Semaphore(8 if cloud else 3)
+        semaphore = asyncio.Semaphore(CLOUD_CONCURRENCY if cloud else 3)
         await asyncio.gather(*[fetch_chunk(i, chunk, semaphore) for i, (_, chunk, _) in enumerate(jobs)])
 
+    from concurrent.futures import ThreadPoolExecutor
+    cloud_pool = ThreadPoolExecutor(max_workers=CLOUD_CONCURRENCY * 4) if cloud else None
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(run_all())
     finally:
         loop.close()
+        if cloud_pool:
+            cloud_pool.shutdown(wait=False)
 
     if fatal:
         return [], 0, fatal[0]
@@ -543,3 +560,52 @@ def select_chapters(sections, book=None):
                 continue
         chapters.append((s['title'], s['text']))
     return chapters or [(s['title'], s['text']) for s in sections]
+
+
+# Dollars per million characters of book text. Kokoro Cloud measured on OpenRouter, Oct 2026.
+PRICE_PER_MILLION_CHARS = {'Kokoro': 0, 'Kokoro Cloud': 4.0, 'Edge TTS': 0, 'gTTS': 0}
+# Rough generation speed in characters per minute (Kokoro Cloud: up to ~40 s per CLOUD_CHUNK_SIZE request,
+# CLOUD_CONCURRENCY at a time; OpenRouter's speed varies a lot)
+CHARS_PER_MINUTE = {'Kokoro': 4000, 'Kokoro Cloud': 10000, 'Edge TTS': 40000, 'gTTS': 20000}
+SPOKEN_CHARS_PER_MINUTE = 850  # measured: ~850 characters make one minute of narration
+COST_MARGIN = 1.10  # retried pieces and rounding can add a little
+
+
+def estimate_job(chars, engine):
+    """Returns {'audio_hours', 'minutes', 'cost_low', 'cost_high'} for `chars` of book text."""
+    cost = chars / 1e6 * PRICE_PER_MILLION_CHARS.get(engine, 0)
+    return {'audio_hours': chars / SPOKEN_CHARS_PER_MINUTE / 60,
+            'minutes': max(1, round(chars / CHARS_PER_MINUTE.get(engine, 2000))),
+            'cost_low': cost, 'cost_high': cost * COST_MARGIN}
+
+
+def format_duration(minutes):
+    if minutes < 1:
+        return "less than a minute"
+    return f"{round(minutes)} min" if minutes < 90 else f"{minutes / 60:.1f} hours"
+
+
+def time_left(started, done, total, now=None):
+    """' - about 18 min left', from the speed so far; '' until there's something to go on."""
+    elapsed = (now or time.time()) - started
+    if done <= 0 or elapsed <= 0 or done >= total:
+        return "..."
+    return f" - about {format_duration(elapsed / done * (total - done) / 60)} left"
+
+
+def describe_estimate(chars, engine, now=None):
+    """The estimate as a few lines for the confirm dialog."""
+    import datetime
+    e = estimate_job(chars, engine)
+    minutes = e['minutes']
+    finish = (now or datetime.datetime.now()) + datetime.timedelta(minutes=minutes)
+    day = '' if finish.date() == (now or datetime.datetime.now()).date() else ' tomorrow'
+    clock = finish.strftime('%I:%M %p').lstrip('0')  # '%-I' isn't supported on Windows
+    took = f"{format_duration(minutes)} (done around {clock}{day})"
+    if e['cost_high'] == 0:
+        cost = "Free" + (" (runs on this computer, uses battery)" if engine == 'Kokoro' else "")
+    else:
+        cost = f"${e['cost_low']:.2f} to ${e['cost_high']:.2f} on your OpenRouter account"
+    return (f"Book text: {chars:,} characters, about {e['audio_hours']:.1f} hours of audio.\n"
+            f"Estimated time to make: ~{took}.\n"
+            f"Estimated cost: {cost}.")
