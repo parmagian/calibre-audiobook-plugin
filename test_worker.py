@@ -64,9 +64,11 @@ def test_kokoro_cloud():
         def put(self, x): pass
 
     calls = []
-    def fake_speech(text, voice, key):
+    def fake_speech(text, voice, key, model='hexgrad/kokoro-82m'):
         calls.append(text)
+        models.append(model)
         return b'\x01\x00' * 2400, 24000  # 0.1 s of audio per chunk
+    models = []
     real = worker.openrouter_speech
     worker.openrouter_speech = fake_speech
     try:
@@ -85,6 +87,15 @@ def test_kokoro_cloud():
             # 2 big chunks; only the last one ends a paragraph, then the chapter pause
             assert len(calls) == 3, len(calls)
             assert abs(seconds - (0.2 + worker.PARAGRAPH_PAUSE + worker.CHAPTER_PAUSE)) < 0.01, seconds
+
+        # Gemini goes to its own model in paragraph-sized pieces
+        calls.clear(); models.clear()
+        with tempfile.TemporaryDirectory() as d:
+            parts, failed, _ = worker.run_online_tts(chapters, 'Sulafat', 'Gemini Flash', 'en', None, d,
+                                                     Q(), threading.Event(), lambda m: None, 'key', {})
+            assert failed == 0 and len(parts) == 2
+            assert set(models) == {'google/gemini-3.8-flash-tts'}, models
+            assert all(len(c) <= 400 for c in calls) and len(calls) > 3
 
         # A bad key stops the job instead of retrying every chunk
         def bad_key(*a):
@@ -106,6 +117,7 @@ def test_estimate():
     assert worker.estimate_job(1_000_000, 'Kokoro')['cost_high'] == 0
     assert '$1.92 to $2.11' in worker.describe_estimate(480_000, 'Kokoro Cloud')
     assert 'Free' in worker.describe_estimate(480_000, 'Edge TTS')
+    assert '$4.39 to $4.83' in worker.describe_estimate(266_345, 'Gemini Flash')
     import datetime
     at_3pm = datetime.datetime(2026, 10, 18, 15, 0)
     text = worker.describe_estimate(266_345, 'Kokoro Cloud', now=at_3pm)

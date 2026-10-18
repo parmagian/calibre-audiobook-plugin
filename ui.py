@@ -19,6 +19,9 @@ from calibre.utils.config import config_dir
 # One row per audiobook job; opens in Numbers/Excel
 STATS_PATH = os.path.join(config_dir, 'plugins', 'audiobook_generator_stats.csv')
 
+# Gemini voices speak every language; Sulafat is described as warm, Achird as friendly
+GEMINI_VOICES = {'Female': 'Sulafat', 'Male': 'Achird'}
+
 # Kokoro has only one French voice and Brazilian Portuguese
 VOICE_MAPPING = {
     'English': {'Male': 'en-US-AndrewMultilingualNeural', 'Female': 'en-US-AvaMultilingualNeural', 'lang': 'en',
@@ -170,6 +173,8 @@ class InterfacePlugin(InterfaceAction):
         mapping = VOICE_MAPPING.get(language, VOICE_MAPPING['English'])
         if engine.startswith('Kokoro'):
             voice, lang_code = mapping['kokoro'][gender], mapping['kokoro_lang']
+        elif engine.startswith('Gemini'):
+            voice, lang_code = GEMINI_VOICES[gender], mapping['lang']  # Gemini picks up the language itself
         else:
             voice, lang_code = mapping[gender], mapping['lang']
 

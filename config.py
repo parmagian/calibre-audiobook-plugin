@@ -40,23 +40,24 @@ class ConfigWidget(QWidget):
         self.engine_label = QLabel('TTS Engine:')
         self.h1.addWidget(self.engine_label)
         self.engine_combo = QComboBox(self)
-        self.engine_combo.addItems(['Kokoro', 'Kokoro Cloud', 'Edge TTS', 'gTTS'])
+        self.engine_combo.addItems(['Kokoro', 'Kokoro Cloud', 'Gemini Flash', 'Gemini Flash Lite', 'Edge TTS', 'gTTS'])
         self.engine_combo.setToolTip('Kokoro: most natural, runs offline on this computer (needs uv and ffmpeg).\n'
-                                     'Kokoro Cloud: same voice via OpenRouter, faster and saves battery (paid, needs ffmpeg).\n'
+                                     'Kokoro Cloud: same voice via OpenRouter, saves battery (paid, needs ffmpeg).\n'
+                                     'Gemini Flash / Flash Lite: Google voices via OpenRouter, most expressive (paid, needs ffmpeg).\n'
                                      'Edge TTS: Microsoft online voices. gTTS: Google, basic.')
         index = self.engine_combo.findText(prefs['tts_engine'])
         if index >= 0:
             self.engine_combo.setCurrentIndex(index)
         self.h1.addWidget(self.engine_combo)
 
-        # 2b. OpenRouter API key (Kokoro Cloud)
+        # 2b. OpenRouter API key (cloud engines)
         self.hk = QHBoxLayout()
         self.l.addLayout(self.hk)
         self.key_label = QLabel('OpenRouter API key:')
         self.hk.addWidget(self.key_label)
         self.key_edit = QLineEdit(prefs['openrouter_key'], self)
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_edit.setPlaceholderText('sk-or-... (only for Kokoro Cloud)')
+        self.key_edit.setPlaceholderText('sk-or-... (only for cloud voices)')
         self.hk.addWidget(self.key_edit)
 
         # 3. Voice Gender Selection
@@ -142,11 +143,12 @@ class ConfigWidget(QWidget):
         self.folder_button.setEnabled(is_external)
     
     def update_engine_ui(self, engine):
-        has_gender = engine in ('Kokoro', 'Kokoro Cloud', 'Edge TTS')
+        has_gender = engine != 'gTTS'
         self.gender_label.setEnabled(has_gender)
         self.gender_combo.setEnabled(has_gender)
-        self.key_label.setEnabled(engine == 'Kokoro Cloud')
-        self.key_edit.setEnabled(engine == 'Kokoro Cloud')
+        is_cloud = engine in ('Kokoro Cloud', 'Gemini Flash', 'Gemini Flash Lite')
+        self.key_label.setEnabled(is_cloud)
+        self.key_edit.setEnabled(is_cloud)
 
     def browse_folder(self):
         f = QFileDialog.getExistingDirectory(self, 'Select Unified Folder', self.folder_edit.text())

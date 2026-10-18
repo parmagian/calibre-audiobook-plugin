@@ -19,7 +19,11 @@ CLOUD_CONCURRENCY = 6  # 6 x 1600 chars worked; 16 at once just queued and timed
 RETRY_DELAYS = (1, 3, 9)
 PARAGRAPH_PAUSE, CHAPTER_PAUSE = 0.4, 1.5  # seconds, same as kokoro_helper.py
 OPENROUTER_URL = 'https://openrouter.ai/api/v1/audio/speech'
-OPENROUTER_MODEL = 'hexgrad/kokoro-82m'
+# Engines that run on OpenRouter: (model id, characters per request).
+# Gemini returns empty audio for long inputs, so it gets paragraph-sized pieces.
+CLOUD_MODELS = {'Kokoro Cloud': ('hexgrad/kokoro-82m', CLOUD_CHUNK_SIZE),
+                'Gemini Flash': ('google/gemini-3.8-flash-tts', 400),
+                'Gemini Flash Lite': ('google/gemini-3.8-flash-lite-tts', 400)}
 KOKORO_MODEL_DIR = os.path.expanduser('~/Library/Application Support/calibre-audiobook/kokoro')
 TOOL_DIRS = ('~/.local/bin', '~/.cargo/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin')
 
@@ -55,7 +59,7 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
         log(f"Chapters: {len(chapters)}, characters: {chars}")
 
         ffmpeg = find_tool('ffmpeg')
-        if not ffmpeg and (engine.startswith('Kokoro') or output_format == 'M4B'):
+        if not ffmpeg and (engine == 'Kokoro' or engine in CLOUD_MODELS or output_format == 'M4B'):
             return False, (book_id, output_format,
                            "ffmpeg not found. Install it with: brew install ffmpeg", None)
 
@@ -186,11 +190,11 @@ class FatalTTSError(Exception):
     """Errors that retrying can't fix (bad API key, no credits): stop the whole job."""
 
 
-def openrouter_speech(text, voice, api_key):
-    """Kokoro on OpenRouter. Returns (raw 16-bit mono PCM bytes, sample_rate)."""
+def openrouter_speech(text, voice, api_key, model=CLOUD_MODELS['Kokoro Cloud'][0]):
+    """A speech model on OpenRouter. Returns (raw 16-bit mono PCM bytes, sample_rate)."""
     import urllib.request
     import urllib.error
-    body = json.dumps({'model': OPENROUTER_MODEL, 'input': text, 'voice': voice, 'response_format': 'pcm'})
+    body = json.dumps({'model': model, 'input': text, 'voice': voice, 'response_format': 'pcm'})
     req = urllib.request.Request(OPENROUTER_URL, data=body.encode('utf-8'), method='POST',
                                  headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'})
     try:
@@ -208,12 +212,13 @@ def openrouter_speech(text, voice, api_key):
 def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifications, abort, log, api_key=None,
                    stats=None):
     """Edge TTS / gTTS / Kokoro Cloud with retries. Returns ([(audio, title)], failed_count, first_error)."""
-    cloud = engine == 'Kokoro Cloud'
+    cloud = engine in CLOUD_MODELS
+    model, cloud_size = CLOUD_MODELS.get(engine, (None, None))
     if cloud and not api_key:
         return [], 0, "No OpenRouter API key. Add it in the plugin settings."
     # (chapter index, text, add a pause after it). Cloud pieces hold several paragraphs, so the
     # pause only goes after a piece that ends a paragraph.
-    size = CLOUD_CHUNK_SIZE if cloud else EDGE_CHUNK_SIZE
+    size = cloud_size if cloud else EDGE_CHUNK_SIZE
     jobs = []
     for ci, (_, text) in enumerate(chapters):
         paragraph_ends = {p.strip()[-40:] for p in text.split('\n\n') if p.strip()}
@@ -234,7 +239,7 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
             # Hard deadline: a slowly trickling response can dodge urllib's per-read timeout.
             # A timed-out thread keeps running until its socket gives up, hence the roomy pool.
             data, sample_rate[0] = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(
-                cloud_pool, openrouter_speech, chunk_text, voice, api_key), CLOUD_TIMEOUT)
+                cloud_pool, openrouter_speech, chunk_text, voice, api_key, model), CLOUD_TIMEOUT)
             return data
         if engine == 'Edge TTS':
             import edge_tts
@@ -615,10 +620,13 @@ def select_chapters(sections, book=None):
 
 
 # Dollars per million characters of book text. Kokoro Cloud measured on OpenRouter, Oct 2026.
-PRICE_PER_MILLION_CHARS = {'Kokoro': 0, 'Kokoro Cloud': 4.0, 'Edge TTS': 0, 'gTTS': 0}
+# Gemini measured from a 934-character sample: $0.0154 (Flash), $0.0098 (Flash Lite).
+PRICE_PER_MILLION_CHARS = {'Kokoro': 0, 'Kokoro Cloud': 4.0, 'Gemini Flash': 16.5, 'Gemini Flash Lite': 10.5,
+                           'Edge TTS': 0, 'gTTS': 0}
 # Rough generation speed in characters per minute (Kokoro Cloud: up to ~40 s per CLOUD_CHUNK_SIZE request,
 # CLOUD_CONCURRENCY at a time; OpenRouter's speed varies a lot)
-CHARS_PER_MINUTE = {'Kokoro': 4000, 'Kokoro Cloud': 10000, 'Edge TTS': 40000, 'gTTS': 20000}
+CHARS_PER_MINUTE = {'Kokoro': 4000, 'Kokoro Cloud': 10000, 'Gemini Flash': 8000, 'Gemini Flash Lite': 8000,
+                    'Edge TTS': 40000, 'gTTS': 20000}
 SPOKEN_CHARS_PER_MINUTE = 850  # measured: ~850 characters make one minute of narration
 COST_MARGIN = 1.10  # retried pieces and rounding can add a little
 
