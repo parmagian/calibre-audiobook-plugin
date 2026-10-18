@@ -129,7 +129,9 @@ def append_stats(path, row):
         w = csv.DictWriter(f, fieldnames=STATS_COLUMNS, extrasaction='ignore')
         if new:
             w.writeheader()
-        w.writerow(row)
+        # Titles, authors and errors come from books and servers; keep spreadsheets from running them as formulas
+        w.writerow({k: "'" + v if isinstance(v, str) and v[:1] in ('=', '+', '-', '@', '\t', '\r') else v
+                    for k, v in row.items()})
 
 
 def run_kokoro(chapters, voice, lang_code, helper_src, workdir, notifications, abort, log):

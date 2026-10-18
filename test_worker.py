@@ -124,6 +124,10 @@ def test_append_stats():
         assert list(rows[0]) == worker.STATS_COLUMNS  # header written once, extra keys ignored
         assert [r['title'] for r in rows] == ['Gathering Blue', 'Dark Matter, a Novel']
         assert rows[0]['cost'] == '1.07' and rows[1]['cost'] == ''
+        worker.append_stats(path, {'title': '=HYPERLINK("http://x")', 'author': '@me', 'cost': -0.0})
+        row = list(csv.DictReader(open(path)))[-1]
+        assert row['title'] == '\'=HYPERLINK("http://x")' and row['author'] == "'@me", row
+        assert row['cost'] == '-0.0'  # numbers are left alone
 
 
 def test_time_left():
