@@ -12,6 +12,7 @@ build:
 		ui.py \
 		config.py \
 		worker.py \
+		kokoro_helper.py \
 		dialogs.py \
 		images/ \
 		vendor/ \

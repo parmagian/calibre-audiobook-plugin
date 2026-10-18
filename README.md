@@ -1,6 +1,6 @@
 # Calibre Audiobook Generator Plugin
 
-A Calibre plugin that generates high-quality audiobooks (MP3) from your ebooks using modern Text-to-Speech (TTS) engines.
+A Calibre plugin that generates high-quality audiobooks (M4B with chapters, or MP3) from your ebooks using modern Text-to-Speech (TTS) engines.
 
 ![License](https://img.shields.io/badge/license-GPL-blue.svg)
 ![Calibre](https://img.shields.io/badge/Calibre-5.0+-green.svg)
@@ -19,8 +19,8 @@ A Calibre plugin that generates high-quality audiobooks (MP3) from your ebooks u
 ## Features
 
 - **Multiple TTS Engines**: 
-  - **Edge TTS**: Uses Microsoft Edge's high-quality neural voices (Default).
-  - **VibeVoice**: Microsoft's open-source long-form TTS model (requires local model download).
+  - **Kokoro** (Default): A natural-sounding open-source voice that runs offline on your computer. Needs [uv](https://docs.astral.sh/uv/) and [ffmpeg](https://ffmpeg.org/) (`brew install uv ffmpeg`). The first run downloads ~350 MB.
+  - **Edge TTS**: Uses Microsoft Edge's neural voices (needs internet).
   - **gTTS**: Google Text-to-Speech fallback.
 - **Expanded Language Support**: Support for English, Spanish (Latam & Spain), Portuguese, French, and Italian.
 - **Smart Language Detection**: Automatically detects book language from metadata (supports 2/3-letter ISO codes).
@@ -28,7 +28,10 @@ A Calibre plugin that generates high-quality audiobooks (MP3) from your ebooks u
   - **Internal**: Keeps generated audiobooks inside Calibre's book folders.
   - **External (Unified)**: Collects all audiobooks into a single folder outside Calibre.
 - **Voice Selection**: Choose between Male and Female neural voices.
-- **Library Integration**: Automatically adds the generated MP3 as a new format to your existing Calibre book entry.
+- **Skips front and back matter**: Table of contents, copyright, title pages, dedications, acknowledgments, notes, index, "About the Author" and ads for other books are not read. Introductions, prefaces, forewords and prologues are kept.
+- **Chapters and cover**: M4B output has a chapter marker per section plus the book cover and tags (needs ffmpeg).
+- **Retries**: Failed pieces are retried, and you are told if any part is still missing.
+- **Library Integration**: Automatically adds the generated audiobook as a new format to your existing Calibre book entry.
 - **Progress Tracking**: Real-time status updates in Calibre's status bar and a progress dialog.
 - **Clean Extraction**: Automatically strips HTML tags, scripts, and styles from EPUBs to ensure clean audio.
 
@@ -81,7 +84,7 @@ Available settings:
 2. Click the **Audiobook Generator** button in the toolbar.
 3. Confirm the generation details in the dialog.
 4. Wait for the process to finish (check the status bar for progress).
-5. The **MP3** format will be added to the book's available formats in the right-hand panel.
+5. The **M4B** (or MP3) format will be added to the book's available formats in the right-hand panel.
 
 ## Development
 
@@ -92,7 +95,7 @@ Dependencies are tracked in the `Pipfile`.
 ## Credits
 
 - **Author**: Miguel Aguero
-- **Libraries**: [edge-tts](https://github.com/rany2/edge-tts), [VibeVoice](https://github.com/microsoft/VibeVoice), [gTTS](https://github.com/pndurette/gTTS), [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/)
+- **Libraries**: [edge-tts](https://github.com/rany2/edge-tts), [Kokoro](https://github.com/thewh1teagle/kokoro-onnx), [gTTS](https://github.com/pndurette/gTTS), [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/)
 
 ## License
 

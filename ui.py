@@ -9,11 +9,30 @@ if vendor_path not in sys.path:
     sys.path.insert(0, vendor_path)
 
 from calibre.gui2.actions import InterfaceAction
-from calibre.gui2 import error_dialog, question_dialog, info_dialog, Dispatcher
+from calibre.gui2 import error_dialog, question_dialog, info_dialog, warning_dialog, Dispatcher
 from calibre.gui2.threaded_jobs import ThreadedJob
 from calibre_plugins.audiobook_generator.config import prefs
 
 from qt.core import QImage, QPainter, QBuffer, QIODevice, Qt, QMenu
+
+# Kokoro has only one French voice and Brazilian Portuguese
+VOICE_MAPPING = {
+    'English': {'Male': 'en-US-AndrewMultilingualNeural', 'Female': 'en-US-AvaMultilingualNeural', 'lang': 'en',
+                'kokoro': {'Male': 'am_michael', 'Female': 'af_heart'}, 'kokoro_lang': 'en-us'},
+    'Spanish (Latam)': {'Male': 'es-MX-JorgeNeural', 'Female': 'es-MX-DaliaNeural', 'lang': 'es',
+                        'kokoro': {'Male': 'em_alex', 'Female': 'ef_dora'}, 'kokoro_lang': 'es'},
+    'Spanish (Spain)': {'Male': 'es-ES-AlvaroNeural', 'Female': 'es-ES-ElviraNeural', 'lang': 'es',
+                        'kokoro': {'Male': 'em_alex', 'Female': 'ef_dora'}, 'kokoro_lang': 'es'},
+    'Portuguese': {'Male': 'pt-PT-DuarteNeural', 'Female': 'pt-PT-RaquelNeural', 'lang': 'pt',
+                   'kokoro': {'Male': 'pm_alex', 'Female': 'pf_dora'}, 'kokoro_lang': 'pt-br'},
+    'French': {'Male': 'fr-FR-HenriNeural', 'Female': 'fr-FR-DeniseNeural', 'lang': 'fr',
+               'kokoro': {'Male': 'ff_siwis', 'Female': 'ff_siwis'}, 'kokoro_lang': 'fr-fr'},
+    'Italian': {'Male': 'it-IT-DiegoNeural', 'Female': 'it-IT-ElsaNeural', 'lang': 'it',
+                'kokoro': {'Male': 'im_nicola', 'Female': 'if_sara'}, 'kokoro_lang': 'it'},
+}
+
+# Rough generation speed, for the time estimate
+CHARS_PER_MINUTE = {'Kokoro': 4000, 'Edge TTS': 40000, 'gTTS': 20000}
 
 # Global reference to the plugin instance for the config dialog
 _plugin_instance = None
@@ -100,32 +119,16 @@ class InterfacePlugin(InterfaceAction):
 
         epub_path = db.new_api.format_abspath(book_id, 'EPUB')
         est_message = ""
-        
+
         if epub_path and os.path.exists(epub_path):
             try:
-                from calibre.ebooks.oeb.polish.container import get_container
-                from bs4 import BeautifulSoup
-                container = get_container(epub_path)
-                spine_names = [x[0] if isinstance(x, (list, tuple)) else x for x in container.spine_names]
-                total_text_len = 0
-                for name in spine_names:
-                    mime = container.mime_map.get(name)
-                    if mime in {'text/html', 'application/xhtml+xml'}:
-                        raw = container.raw_data(name)
-                        soup = BeautifulSoup(raw, 'html.parser')
-                        for tag in soup(["script", "style", "img", "image", "svg", "video", "audio", "iframe"]):
-                            tag.decompose()
-                        text = soup.get_text(separator=' ', strip=True)
-                        if text:
-                            title_tag = soup.find(['h1', 'h2', 'h3'])
-                            title_text = title_tag.get_text().strip() if title_tag else ""
-                            total_text_len += len(f"{title_text}\n\n{text}\n\n")
-                
-                chunk_size = 5000
-                num_chunks = (total_text_len // chunk_size) + (1 if total_text_len % chunk_size > 0 else 0)
-                total_seconds = num_chunks * 7
-                est_minutes = int(total_seconds / 60)
-                est_message = f"Estimated time: ~{total_seconds if total_seconds < 60 else est_minutes} {'seconds' if total_seconds < 60 else 'minutes'} ({num_chunks} chunks)."
+                from calibre_plugins.audiobook_generator.worker import extract_chapters
+                author = mi.authors[0] if mi.authors else ''
+                chapters = extract_chapters(epub_path, 'en', {'title': title, 'author': author})
+                chars = sum(len(t) for _, t in chapters)
+                minutes = max(1, int(chars / CHARS_PER_MINUTE.get(engine, 2000)))
+                est_message = (f"{len(chapters)} chapters (front and back matter skipped).\n"
+                               f"Estimated time: ~{minutes} minutes.")
             except:
                 est_message = "Estimation unavailable."
 
@@ -146,68 +149,71 @@ class InterfacePlugin(InterfaceAction):
             return error_dialog(self.gui, 'No EPUB found', 'This book does not have an EPUB format.', show=True)
 
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tf:
-            temp_mp3 = tf.name
+        with tempfile.NamedTemporaryFile(suffix='.' + output_format.lower(), delete=False) as tf:
+            temp_out = tf.name
 
-        VOICE_MAPPING = {
-            'English': {'Male': 'en-US-GuyNeural', 'Female': 'en-US-AriaNeural', 'lang': 'en'},
-            'Spanish (Latam)': {'Male': 'es-MX-JorgeNeural', 'Female': 'es-MX-DaliaNeural', 'lang': 'es'},
-            'Spanish (Spain)': {'Male': 'es-ES-AlvaroNeural', 'Female': 'es-ES-ElviraNeural', 'lang': 'es'},
-            'Portuguese': {'Male': 'pt-PT-DuarteNeural', 'Female': 'pt-PT-RaquelNeural', 'lang': 'pt'},
-            'French': {'Male': 'fr-FR-HenriNeural', 'Female': 'fr-FR-DeniseNeural', 'lang': 'fr'},
-            'Italian': {'Male': 'it-IT-DiegoNeural', 'Female': 'it-IT-ElsaNeural', 'lang': 'it'}
-        }
-        
         mapping = VOICE_MAPPING.get(language, VOICE_MAPPING['English'])
-        voice = mapping[gender] if engine == 'Edge TTS' else None
-        lang_code = mapping['lang'] if engine != 'VibeVoice' else None
-        audio_quality = prefs.get('audio_quality', 'Low')
+        if engine == 'Kokoro':
+            voice, lang_code = mapping['kokoro'][gender], mapping['kokoro_lang']
+        else:
+            voice, lang_code = mapping[gender], mapping['lang']
+
+        mi = db.get_metadata(book_id)
+        meta = {'title': mi.title, 'author': mi.authors[0] if mi.authors else '',
+                'cover': db.cover(book_id, as_path=True), 'helper_src': get_resources('kokoro_helper.py')}
 
         callback = Dispatcher(self.on_job_finished)
-        job = ThreadedJob('audiobook_gen', f'Generating audiobook for "{title}"', worker_main, 
-                          [epub_path, temp_mp3, voice, engine, lang_code, vendor_path, book_id, output_format, audio_quality], {}, 
+        job = ThreadedJob('audiobook_gen', f'Generating audiobook for "{title}"', worker_main,
+                          [epub_path, temp_out, voice, engine, lang_code, vendor_path, book_id, output_format, meta], {},
                           callback)
+        job.temp_files = [temp_out, meta['cover']]
         self.gui.job_manager.run_threaded_job(job)
         self.gui.status_bar.show_message(f'Audiobook Generator: Background job started for "{title}"', 3000)
 
     def on_job_finished(self, job):
+        temp_files = [p for p in getattr(job, 'temp_files', []) if p]
+        try:
+            self.save_job_result(job)
+        finally:
+            for path in temp_files:
+                if os.path.exists(path):
+                    os.remove(path)
+
+    def save_job_result(self, job):
         if job.failed:
-            self.gui.status_bar.show_message('Audiobook Generator: Job failed!', 10000)
-            return
+            return error_dialog(self.gui, 'Audiobook Generator failed',
+                                f'The job crashed: {job.exception}', det_msg=job.details, show=True)
 
-        try:
-            success, result_data = job.result
-            book_id, output_format, result_val = result_data
-        except: return
-
+        success, (book_id, output_format, result_val, warning) = job.result
         if not success:
-            self.gui.status_bar.show_message(f"Audiobook Generator: FAILED - {result_val}", 10000)
-            return
+            return error_dialog(self.gui, 'Audiobook Generator failed', result_val,
+                                det_msg=job.details, show=True)
 
-        temp_mp3 = result_val
-        try:
-            db = self.gui.current_db.new_api
-            storage_mode = prefs.get('storage_mode', 'Internal')
-            unified_path = prefs.get('unified_folder_path', '')
+        temp_out = result_val
+        db = self.gui.current_db.new_api
+        storage_mode = prefs.get('storage_mode', 'Internal')
+        unified_path = prefs.get('unified_folder_path', '')
 
-            if storage_mode == 'External' and unified_path and os.path.exists(unified_path):
-                import shutil
-                mi = db.get_metadata(book_id)
-                safe_title = "".join([c for c in mi.title if c.isalnum() or c in (' ', '-', '_')]).strip()
-                safe_author = "".join([c for c in mi.authors[0] if c.isalnum() or c in (' ', '-', '_')]).strip()
-                filename = f"{safe_title} - {safe_author}.{output_format.lower()}"
-                dest_path = os.path.join(unified_path, filename)
-                shutil.move(temp_mp3, dest_path)
-            else:
-                with open(temp_mp3, 'rb') as f:
-                    db.add_format(book_id, output_format, f, replace=True)
-                if os.path.exists(temp_mp3):
-                    os.remove(temp_mp3)
-            
-            self.apply_emblem_to_book(book_id)
-            self.gui.status_bar.show_message('Audiobook Generator: SUCCESS - Finished and saved.', 10000)
-        except Exception as e:
-            self.gui.status_bar.show_message(f"Audiobook Generator: Error - {str(e)}", 10000)
+        if storage_mode == 'External' and unified_path and os.path.exists(unified_path):
+            import shutil
+            from calibre_plugins.audiobook_generator.worker import unique_path
+            mi = db.get_metadata(book_id)
+            safe_title = "".join([c for c in mi.title if c.isalnum() or c in (' ', '-', '_')]).strip()
+            safe_author = "".join([c for c in mi.authors[0] if c.isalnum() or c in (' ', '-', '_')]).strip()
+            dest_path = unique_path(unified_path, f"{safe_title} - {safe_author}", output_format.lower())
+            shutil.move(temp_out, dest_path)
+            saved_to = dest_path
+        else:
+            with open(temp_out, 'rb') as f:
+                db.add_format(book_id, output_format, f, replace=True)
+            saved_to = 'your Calibre library'
+
+        self.apply_emblem_to_book(book_id)
+        if warning:
+            warning_dialog(self.gui, 'Audiobook saved with gaps', f'Saved to {saved_to}, but {warning}',
+                           det_msg=job.details, show=True)
+        else:
+            self.gui.status_bar.show_message(f'Audiobook Generator: SUCCESS - saved to {saved_to}', 10000)
 
     def has_audio_format(self, book_id):
         db = self.gui.current_db.new_api

@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-10-18
+### Added
+- Kokoro: natural-sounding offline voice, run through `uv` outside Calibre's Python. Now the default engine.
+- M4B output (new default) with chapter markers, cover art and title/author tags via ffmpeg.
+- Front and back matter (contents, copyright, acknowledgments, notes, index, About the Author, ads) are skipped; intros, prefaces, forewords and prologues are kept.
+- Failed pieces are retried 3 times; the real error and any missing parts are reported.
+### Changed
+- Text is split at sentence ends instead of every 5000 characters, with pauses between paragraphs and chapters.
+- Edge TTS English voices switched to Andrew/Ava Multilingual. Bumped edge-tts to 7.3.1 (7.2.8 was rejected with 403).
+- Existing audiobooks in the unified folder are no longer overwritten.
+### Removed
+- VibeVoice engine and the non-functional "Audio quality" setting.
+
 ## [1.1.1] - 2026-08-11
 ### Fixed
 - Edge TTS: removed an `audio_format` argument no longer accepted by the vendored edge-tts library, which was crashing every chunk.

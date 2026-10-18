@@ -6,10 +6,9 @@ prefs = JSONConfig('plugins/audiobook_generator')
 
 # Set default values
 prefs.defaults['language'] = 'English'
-prefs.defaults['tts_engine'] = 'Edge TTS'
-prefs.defaults['voice_gender'] = 'Male'
-prefs.defaults['output_format'] = 'MP3'
-prefs.defaults['audio_quality'] = 'Standard'
+prefs.defaults['tts_engine'] = 'Kokoro'
+prefs.defaults['voice_gender'] = 'Female'
+prefs.defaults['output_format'] = 'M4B'
 prefs.defaults['detect_language'] = False
 prefs.defaults['storage_mode'] = 'Internal'
 prefs.defaults['unified_folder_path'] = ''
@@ -27,25 +26,12 @@ class ConfigWidget(QWidget):
         self.format_label = QLabel('Output Format:')
         self.h0.addWidget(self.format_label)
         self.format_combo = QComboBox(self)
-        self.format_combo.addItems(['MP3', 'M4B'])
+        self.format_combo.addItems(['M4B', 'MP3'])
+        self.format_combo.setToolTip('M4B has chapters and works in Apple Books. Both need ffmpeg except plain MP3 with Edge/gTTS.')
         index = self.format_combo.findText(prefs['output_format'])
         if index >= 0:
             self.format_combo.setCurrentIndex(index)
         self.h0.addWidget(self.format_combo)
-
-        # 1b. Audio Quality (Edge TTS)
-        self.hq = QHBoxLayout()
-        self.l.addLayout(self.hq)
-        self.quality_label = QLabel('Audio Quality (Edge TTS):')
-        self.hq.addWidget(self.quality_label)
-        self.quality_combo = QComboBox(self)
-        self.quality_combo.addItems(['Standard', 'High'])
-        stored_quality = prefs['audio_quality']
-        if stored_quality == 'Low': stored_quality = 'Standard'
-        index = self.quality_combo.findText(stored_quality)
-        if index >= 0:
-            self.quality_combo.setCurrentIndex(index)
-        self.hq.addWidget(self.quality_combo)
 
         # 2. TTS Engine Selection
         self.h1 = QHBoxLayout()
@@ -53,7 +39,9 @@ class ConfigWidget(QWidget):
         self.engine_label = QLabel('TTS Engine:')
         self.h1.addWidget(self.engine_label)
         self.engine_combo = QComboBox(self)
-        self.engine_combo.addItems(['Edge TTS', 'gTTS', 'VibeVoice'])
+        self.engine_combo.addItems(['Kokoro', 'Edge TTS', 'gTTS'])
+        self.engine_combo.setToolTip('Kokoro: most natural, runs offline on this computer (needs uv and ffmpeg).\n'
+                                     'Edge TTS: Microsoft online voices. gTTS: Google, basic.')
         index = self.engine_combo.findText(prefs['tts_engine'])
         if index >= 0:
             self.engine_combo.setCurrentIndex(index)
@@ -62,7 +50,7 @@ class ConfigWidget(QWidget):
         # 3. Voice Gender Selection
         self.h2 = QHBoxLayout()
         self.l.addLayout(self.h2)
-        self.gender_label = QLabel('Voice Gender (Edge TTS only):')
+        self.gender_label = QLabel('Voice Gender:')
         self.h2.addWidget(self.gender_label)
         self.gender_combo = QComboBox(self)
         self.gender_combo.addItems(['Male', 'Female'])
@@ -142,11 +130,9 @@ class ConfigWidget(QWidget):
         self.folder_button.setEnabled(is_external)
     
     def update_engine_ui(self, engine):
-        is_edge = engine == 'Edge TTS'
-        self.gender_label.setEnabled(is_edge)
-        self.gender_combo.setEnabled(is_edge)
-        self.quality_label.setEnabled(is_edge)
-        self.quality_combo.setEnabled(is_edge)
+        has_gender = engine in ('Kokoro', 'Edge TTS')
+        self.gender_label.setEnabled(has_gender)
+        self.gender_combo.setEnabled(has_gender)
 
     def browse_folder(self):
         f = QFileDialog.getExistingDirectory(self, 'Select Unified Folder', self.folder_edit.text())
@@ -162,7 +148,6 @@ class ConfigWidget(QWidget):
         prefs['tts_engine'] = self.engine_combo.currentText()
         prefs['voice_gender'] = self.gender_combo.currentText()
         prefs['output_format'] = self.format_combo.currentText()
-        prefs['audio_quality'] = self.quality_combo.currentText()
         prefs['detect_language'] = self.detect_language_checkbox.isChecked()
         prefs['storage_mode'] = 'Internal' if 'Internal' in self.storage_combo.currentText() else 'External'
         prefs['unified_folder_path'] = self.folder_edit.text() if self.folder_edit.text() != 'Not Selected' else ''
