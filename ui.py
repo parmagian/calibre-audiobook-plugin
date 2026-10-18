@@ -71,9 +71,10 @@ class InterfacePlugin(InterfaceAction):
         )
         self.config_action.triggered.connect(self.do_config)
         
+        # attr is where Calibre stores the action on self, so it must not be a method name
         self.stats_action = self.create_action(
-            spec=('Open audiobook statistics', 'chart.png', 'Open the log of every audiobook made', None),
-            attr='open_stats'
+            spec=('Open audiobook statistics', None, 'Open the log of every audiobook made', None),
+            attr='stats_menu_action'
         )
         self.stats_action.triggered.connect(self.open_stats)
 
