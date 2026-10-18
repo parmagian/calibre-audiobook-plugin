@@ -14,6 +14,10 @@ from calibre.gui2.threaded_jobs import ThreadedJob
 from calibre_plugins.audiobook_generator.config import prefs
 
 from qt.core import QImage, QPainter, QBuffer, QIODevice, Qt, QMenu
+from calibre.utils.config import config_dir
+
+# One row per audiobook job; opens in Numbers/Excel
+STATS_PATH = os.path.join(config_dir, 'plugins', 'audiobook_generator_stats.csv')
 
 # Kokoro has only one French voice and Brazilian Portuguese
 VOICE_MAPPING = {
@@ -67,9 +71,23 @@ class InterfacePlugin(InterfaceAction):
         )
         self.config_action.triggered.connect(self.do_config)
         
+        self.stats_action = self.create_action(
+            spec=('Open audiobook statistics', 'chart.png', 'Open the log of every audiobook made', None),
+            attr='open_stats'
+        )
+        self.stats_action.triggered.connect(self.open_stats)
+
         self.menu = QMenu(self.gui)
         self.menu.addAction(self.config_action)
+        self.menu.addAction(self.stats_action)
         self.qaction.setMenu(self.menu)
+
+    def open_stats(self):
+        if not os.path.exists(STATS_PATH):
+            return info_dialog(self.gui, 'No statistics yet',
+                               'Statistics are recorded after your first audiobook finishes.', show=True)
+        from calibre.gui2 import open_local_file
+        open_local_file(STATS_PATH)
 
     def do_config(self):
         if hasattr(self, 'interface_action_base_plugin'):
@@ -157,36 +175,54 @@ class InterfacePlugin(InterfaceAction):
         mi = db.get_metadata(book_id)
         meta = {'title': mi.title, 'author': mi.authors[0] if mi.authors else '',
                 'cover': db.cover(book_id, as_path=True), 'helper_src': get_resources('kokoro_helper.py'),
-                'api_key': prefs.get('openrouter_key', '').strip() or os.environ.get('OPENROUTER_API_KEY', '')}
+                'api_key': prefs.get('openrouter_key', '').strip() or os.environ.get('OPENROUTER_API_KEY', ''),
+                'stats': {}}
 
         callback = Dispatcher(self.on_job_finished)
         job = ThreadedJob('audiobook_gen', f'Generating audiobook for "{title}"', worker_main,
                           [epub_path, temp_out, voice, engine, lang_code, vendor_path, book_id, output_format, meta], {},
                           callback)
         job.temp_files = [temp_out, meta['cover']]
+        job.stats = meta['stats']  # the worker fills this in as it runs
         self.gui.job_manager.run_threaded_job(job)
         self.gui.status_bar.show_message(f'Audiobook Generator: Background job started for "{title}"', 3000)
 
     def on_job_finished(self, job):
         temp_files = [p for p in getattr(job, 'temp_files', []) if p]
+        stats = getattr(job, 'stats', {})
         try:
-            self.save_job_result(job)
+            self.save_job_result(job, stats)
+        except Exception as e:
+            stats.update(status='failed', error=f'Saving failed: {e}')
+            raise
         finally:
+            self.record_stats(stats)
             for path in temp_files:
                 if os.path.exists(path):
                     os.remove(path)
 
-    def save_job_result(self, job):
+    def record_stats(self, stats):
+        from calibre_plugins.audiobook_generator.worker import append_stats
+        try:
+            append_stats(STATS_PATH, stats)
+        except Exception as e:  # never let bookkeeping break the job
+            print('Audiobook Generator: could not write statistics:', e)
+
+    def save_job_result(self, job, stats):
         if job.failed:
+            stats.update(status='crashed', error=str(job.exception))
             return error_dialog(self.gui, 'Audiobook Generator failed',
                                 f'The job crashed: {job.exception}', det_msg=job.details, show=True)
 
         success, (book_id, output_format, result_val, warning) = job.result
         if not success:
+            stats.update(status='stopped' if result_val == 'Aborted.' else 'failed', error=result_val)
             return error_dialog(self.gui, 'Audiobook Generator failed', result_val,
                                 det_msg=job.details, show=True)
 
         temp_out = result_val
+        stats.update(status='saved with gaps' if warning else 'success', error=warning or '',
+                     file_mb=round(os.path.getsize(temp_out) / 1e6, 1))
         db = self.gui.current_db.new_api
         storage_mode = prefs.get('storage_mode', 'Internal')
         unified_path = prefs.get('unified_folder_path', '')
@@ -204,6 +240,7 @@ class InterfacePlugin(InterfaceAction):
             with open(temp_out, 'rb') as f:
                 db.add_format(book_id, output_format, f, replace=True)
             saved_to = 'your Calibre library'
+        stats['saved_to'] = saved_to
 
         self.apply_emblem_to_book(book_id)
         if warning:

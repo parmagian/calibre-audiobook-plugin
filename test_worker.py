@@ -73,9 +73,12 @@ def test_kokoro_cloud():
         long_para = ' '.join(f'This is sentence number {i} of a long paragraph.' for i in range(50))  # > CLOUD_CHUNK_SIZE
         chapters = [('One', f'First para. Second sentence.\n\n{long_para}'), ('Two', 'Only para.')]
         with tempfile.TemporaryDirectory() as d:
+            stats = {}
             parts, failed, err = worker.run_online_tts(chapters, 'af_heart', 'Kokoro Cloud', 'en-us', None, d,
-                                                       Q(), threading.Event(), lambda m: None, 'key')
+                                                       Q(), threading.Event(), lambda m: None, 'key', stats)
             assert failed == 0 and [t for _, t in parts] == ['One', 'Two'], (failed, err)
+            assert stats['pieces'] == 3 and stats['missing_parts'] == 0 and stats['retries'] == 0, stats
+            assert stats['chars_sent'] == sum(len(c) for c in calls), stats
             assert all(len(c) <= worker.CLOUD_CHUNK_SIZE for c in calls)
             with wave.open(parts[0][0]) as w:
                 seconds = w.getnframes() / w.getframerate()
@@ -109,6 +112,18 @@ def test_estimate():
     assert '27 min (done around 3:27 PM)' in text, text
     late = worker.describe_estimate(266_345, 'Kokoro', now=datetime.datetime(2026, 10, 18, 23, 30))
     assert 'tomorrow' in late, late
+
+
+def test_append_stats():
+    import csv
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'sub', 'stats.csv')
+        worker.append_stats(path, {'title': 'Gathering Blue', 'cost': 1.07, 'status': 'success', 'helper_src': b'x'})
+        worker.append_stats(path, {'title': 'Dark Matter, a Novel', 'status': 'failed'})
+        rows = list(csv.DictReader(open(path)))
+        assert list(rows[0]) == worker.STATS_COLUMNS  # header written once, extra keys ignored
+        assert [r['title'] for r in rows] == ['Gathering Blue', 'Dark Matter, a Novel']
+        assert rows[0]['cost'] == '1.07' and rows[1]['cost'] == ''
 
 
 def test_time_left():

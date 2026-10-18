@@ -33,6 +33,12 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
     if vendor_path not in sys.path:
         sys.path.insert(0, vendor_path)
 
+    # Filled in as the job runs; the GUI adds the outcome and writes it to the statistics file
+    stats = meta.setdefault('stats', {})
+    stats.update(started=time.strftime('%Y-%m-%d %H:%M'), title=meta.get('title', ''),
+                 author=meta.get('author', ''), engine=engine, voice=voice, language=lang_code,
+                 format=output_format)
+    t0 = time.time()
     workdir = tempfile.mkdtemp(prefix='audiobook_')
     try:
         log(f"Starting conversion for book ID: {book_id} ({engine}, {voice}, {output_format})")
@@ -42,7 +48,11 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
         chapters = extract_chapters(epub_path, lang_code, meta)
         if not chapters:
             return False, (book_id, output_format, "Could not extract text.", None)
-        log(f"Chapters: {len(chapters)}, characters: {sum(len(t) for _, t in chapters)}")
+        chars = sum(len(t) for _, t in chapters)
+        est = estimate_job(chars, engine)
+        stats.update(chapters=len(chapters), characters=chars, estimated_minutes=est['minutes'],
+                     estimated_cost=round(est['cost_low'], 2))
+        log(f"Chapters: {len(chapters)}, characters: {chars}")
 
         ffmpeg = find_tool('ffmpeg')
         if not ffmpeg and (engine.startswith('Kokoro') or output_format == 'M4B'):
@@ -53,9 +63,11 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
         if engine == 'Kokoro':
             parts, failed, first_error = run_kokoro(chapters, voice, lang_code, meta['helper_src'],
                                                     workdir, notifications, abort, log)
+            stats.update(chars_sent=chars, missing_parts=0)
         else:
             parts, failed, first_error = run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir,
-                                                        notifications, abort, log, meta.get('api_key'))
+                                                        notifications, abort, log, meta.get('api_key'), stats)
+        stats['cost'] = round(stats.get('chars_sent', 0) / 1e6 * PRICE_PER_MILLION_CHARS.get(engine, 0), 2)
 
         if abort.is_set():
             return False, (book_id, output_format, "Aborted.", None)
@@ -75,6 +87,9 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
                     with open(part, 'rb') as f:
                         shutil.copyfileobj(f, out)
 
+        if ffmpeg:
+            stats['audio_hours'] = round(audio_seconds(ffmpeg, output_path) / 3600, 2)
+
         warning = None
         if failed:
             warning = f"{failed} parts are missing ({first_error}). Run again to fill them."
@@ -86,7 +101,35 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
         log(f"CRITICAL ERROR: {traceback.format_exc()}")
         return False, (book_id, output_format, str(e) or type(e).__name__, None)
     finally:
+        stats.update(finished=time.strftime('%Y-%m-%d %H:%M'), minutes_taken=round((time.time() - t0) / 60, 1))
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def audio_seconds(ffmpeg, path):
+    ffprobe = os.path.join(os.path.dirname(ffmpeg), 'ffprobe')
+    try:
+        out = subprocess.run([ffprobe, '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', path],
+                             capture_output=True, text=True, check=True)
+        return float(out.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+STATS_COLUMNS = ['started', 'finished', 'status', 'title', 'author', 'engine', 'voice', 'language', 'format',
+                 'chapters', 'characters', 'audio_hours', 'minutes_taken', 'estimated_minutes', 'cost',
+                 'estimated_cost', 'pieces', 'retries', 'missing_parts', 'file_mb', 'saved_to', 'error']
+
+
+def append_stats(path, row):
+    """Adds one row to the statistics CSV, writing the header first if the file is new."""
+    import csv
+    new = not os.path.exists(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'a', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=STATS_COLUMNS, extrasaction='ignore')
+        if new:
+            w.writeheader()
+        w.writerow(row)
 
 
 def run_kokoro(chapters, voice, lang_code, helper_src, workdir, notifications, abort, log):
@@ -160,7 +203,8 @@ def openrouter_speech(text, voice, api_key):
         raise RuntimeError(f"OpenRouter error {e.code}: {detail}")
 
 
-def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifications, abort, log, api_key=None):
+def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifications, abort, log, api_key=None,
+                   stats=None):
     """Edge TTS / gTTS / Kokoro Cloud with retries. Returns ([(audio, title)], failed_count, first_error)."""
     cloud = engine == 'Kokoro Cloud'
     if cloud and not api_key:
@@ -179,6 +223,7 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
     errors = []
     fatal = []
     completed = [0]
+    retries = [0]
     sample_rate = [24000]
     started = time.time()
 
@@ -222,6 +267,7 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
                         raise RuntimeError("no audio received")
                     results[index] = data
                     completed[0] += 1
+                    retries[0] += attempt
                     notifications.put((0.05 + 0.9 * completed[0] / total,
                                        f"Downloaded {completed[0]} of {total} segments"
                                        + time_left(started, completed[0], total)))
@@ -254,6 +300,10 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
         if cloud_pool:
             cloud_pool.shutdown(wait=False)
 
+    if stats is not None:
+        # Only pieces that came back count toward cost
+        stats.update(pieces=total, retries=retries[0], missing_parts=total - completed[0],
+                     chars_sent=sum(len(chunk) for i, (_, chunk, _) in enumerate(jobs) if results[i]))
     if fatal:
         return [], 0, fatal[0]
     if cloud:
