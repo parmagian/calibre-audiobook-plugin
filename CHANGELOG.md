@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [1.2.0] - 2026-10-18
 ### Added
+- Kokoro Cloud: the same voice through OpenRouter's speech API (API key in settings), 8 requests at a time; a bad key or empty balance stops the job right away.
 - Kokoro: natural-sounding offline voice, run through `uv` outside Calibre's Python. Now the default engine.
 - M4B output (new default) with chapter markers, cover art and title/author tags via ffmpeg.
 - Front and back matter (contents, copyright, acknowledgments, notes, index, About the Author, ads) are skipped; intros, prefaces, forewords and prologues are kept.

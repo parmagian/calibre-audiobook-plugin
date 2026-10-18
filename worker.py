@@ -12,6 +12,9 @@ import unicodedata
 EDGE_CHUNK_SIZE = 2500
 KOKORO_CHUNK_SIZE = 400
 RETRY_DELAYS = (1, 3, 9)
+PARAGRAPH_PAUSE, CHAPTER_PAUSE = 0.4, 1.5  # seconds, same as kokoro_helper.py
+OPENROUTER_URL = 'https://openrouter.ai/api/v1/audio/speech'
+OPENROUTER_MODEL = 'hexgrad/kokoro-82m'
 KOKORO_MODEL_DIR = os.path.expanduser('~/Library/Application Support/calibre-audiobook/kokoro')
 TOOL_DIRS = ('~/.local/bin', '~/.cargo/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin')
 
@@ -37,7 +40,7 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
         log(f"Chapters: {len(chapters)}, characters: {sum(len(t) for _, t in chapters)}")
 
         ffmpeg = find_tool('ffmpeg')
-        if not ffmpeg and (engine == 'Kokoro' or output_format == 'M4B'):
+        if not ffmpeg and (engine.startswith('Kokoro') or output_format == 'M4B'):
             return False, (book_id, output_format,
                            "ffmpeg not found. Install it with: brew install ffmpeg", None)
 
@@ -46,8 +49,8 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
             parts, failed, first_error = run_kokoro(chapters, voice, lang_code, meta['helper_src'],
                                                     workdir, notifications, abort, log)
         else:
-            parts, failed, first_error = run_online_tts(chapters, voice, engine, lang_code,
-                                                        ffmpeg, workdir, notifications, abort, log)
+            parts, failed, first_error = run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir,
+                                                        notifications, abort, log, meta.get('api_key'))
 
         if abort.is_set():
             return False, (book_id, output_format, "Aborted.", None)
@@ -125,17 +128,55 @@ def run_kokoro(chapters, voice, lang_code, helper_src, workdir, notifications, a
     return [p for p in parts if os.path.exists(p[0])], 0, None
 
 
-def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifications, abort, log):
-    """Edge TTS / gTTS with retries. Returns ([(mp3, title)], failed_count, first_error)."""
-    jobs = [(ci, chunk) for ci, (_, text) in enumerate(chapters)
-            for chunk in split_into_chunks(text, EDGE_CHUNK_SIZE)]
+class FatalTTSError(Exception):
+    """Errors that retrying can't fix (bad API key, no credits): stop the whole job."""
+
+
+def openrouter_speech(text, voice, api_key):
+    """Kokoro on OpenRouter. Returns (raw 16-bit mono PCM bytes, sample_rate)."""
+    import urllib.request
+    import urllib.error
+    body = json.dumps({'model': OPENROUTER_MODEL, 'input': text, 'voice': voice, 'response_format': 'pcm'})
+    req = urllib.request.Request(OPENROUTER_URL, data=body.encode('utf-8'), method='POST',
+                                 headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            rate = re.search(r'rate=(\d+)', resp.headers.get('Content-Type', ''))
+            data = resp.read()
+            return data[:len(data) // 2 * 2], int(rate.group(1)) if rate else 24000
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode('utf-8', 'replace')[:300]
+        if e.code in (401, 402, 403):
+            raise FatalTTSError(f"OpenRouter said {e.code} (check your API key and credits): {detail}")
+        raise RuntimeError(f"OpenRouter error {e.code}: {detail}")
+
+
+def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifications, abort, log, api_key=None):
+    """Edge TTS / gTTS / Kokoro Cloud with retries. Returns ([(audio, title)], failed_count, first_error)."""
+    cloud = engine == 'Kokoro Cloud'
+    if cloud and not api_key:
+        return [], 0, "No OpenRouter API key. Add it in the plugin settings."
+    # (chapter index, text, ends a paragraph). Kokoro takes short chunks inside one paragraph.
+    if cloud:
+        jobs = [(ci, chunk, i == len(chunks) - 1) for ci, (_, text) in enumerate(chapters)
+                for para in text.split('\n\n') for chunks in [split_into_chunks(para, KOKORO_CHUNK_SIZE)]
+                for i, chunk in enumerate(chunks)]
+    else:
+        jobs = [(ci, chunk, False) for ci, (_, text) in enumerate(chapters)
+                for chunk in split_into_chunks(text, EDGE_CHUNK_SIZE)]
     total = len(jobs)
     log(f"Total chunks: {total}")
     results = [None] * total
     errors = []
+    fatal = []
     completed = [0]
+    sample_rate = [24000]
 
     async def synthesize(chunk_text):
+        if cloud:
+            data, sample_rate[0] = await asyncio.get_event_loop().run_in_executor(
+                None, openrouter_speech, chunk_text, voice, api_key)
+            return data
         if engine == 'Edge TTS':
             import edge_tts
             data = b""
@@ -161,7 +202,7 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
     async def fetch_chunk(index, chunk_text, semaphore):
         async with semaphore:
             for attempt, delay in enumerate(RETRY_DELAYS + (None,)):
-                if abort.is_set():
+                if abort.is_set() or fatal:
                     return
                 try:
                     data = await synthesize(chunk_text)
@@ -171,6 +212,10 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
                     completed[0] += 1
                     notifications.put((0.05 + 0.9 * completed[0] / total,
                                        f"Downloaded {completed[0]} of {total} segments..."))
+                    return
+                except FatalTTSError as e:
+                    log(f"Error in chunk {index}, stopping: {e}")
+                    fatal.append(str(e))
                     return
                 except Exception as e:
                     msg = str(e) or type(e).__name__
@@ -183,8 +228,8 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
 
     async def run_all():
         # Limit concurrency to avoid getting blocked
-        semaphore = asyncio.Semaphore(3)
-        await asyncio.gather(*[fetch_chunk(i, chunk, semaphore) for i, (_, chunk) in enumerate(jobs)])
+        semaphore = asyncio.Semaphore(8 if cloud else 3)
+        await asyncio.gather(*[fetch_chunk(i, chunk, semaphore) for i, (_, chunk, _) in enumerate(jobs)])
 
     loop = asyncio.new_event_loop()
     try:
@@ -192,16 +237,43 @@ def run_online_tts(chapters, voice, engine, lang_code, ffmpeg, workdir, notifica
     finally:
         loop.close()
 
+    if fatal:
+        return [], 0, fatal[0]
+    if cloud:
+        return write_pcm_chapters(chapters, jobs, results, sample_rate[0], workdir), len(errors), \
+            errors[0] if errors else None
+
     silence = make_silence_mp3(ffmpeg, workdir) if ffmpeg else b""
     parts = []
     for ci, (title, _) in enumerate(chapters):
-        data = b"".join(results[i] for i, (c, _) in enumerate(jobs) if c == ci and results[i])
+        data = b"".join(results[i] for i, (c, _, _) in enumerate(jobs) if c == ci and results[i])
         if data:
             path = os.path.join(workdir, f'chapter_{ci:03d}.mp3')
             with open(path, 'wb') as f:
                 f.write(data + silence)
             parts.append((path, title))
     return parts, len(errors), errors[0] if errors else None
+
+
+def write_pcm_chapters(chapters, jobs, results, sample_rate, workdir):
+    """One WAV per chapter from 16-bit mono PCM chunks, with paragraph and chapter pauses."""
+    import wave
+    def silence(seconds):
+        return b'\x00\x00' * int(sample_rate * seconds)
+    parts = []
+    for ci, (title, _) in enumerate(chapters):
+        pcm = [results[i] + (silence(PARAGRAPH_PAUSE) if para_end else b'')
+               for i, (c, _, para_end) in enumerate(jobs) if c == ci and results[i]]
+        if not pcm:
+            continue
+        path = os.path.join(workdir, f'chapter_{ci:03d}.wav')
+        with wave.open(path, 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sample_rate)
+            w.writeframes(b''.join(pcm) + silence(CHAPTER_PAUSE))
+        parts.append((path, title))
+    return parts
 
 
 def make_silence_mp3(ffmpeg, workdir, seconds=1.5):

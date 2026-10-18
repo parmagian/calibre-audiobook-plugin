@@ -1,4 +1,4 @@
-from qt.core import QWidget, QHBoxLayout, QLabel, QComboBox, QVBoxLayout, QPushButton, QCheckBox, QFileDialog
+from qt.core import QWidget, QHBoxLayout, QLabel, QComboBox, QVBoxLayout, QPushButton, QCheckBox, QFileDialog, QLineEdit
 from calibre.utils.config import JSONConfig
 
 # Initialize the config object. 
@@ -12,6 +12,7 @@ prefs.defaults['output_format'] = 'M4B'
 prefs.defaults['detect_language'] = False
 prefs.defaults['storage_mode'] = 'Internal'
 prefs.defaults['unified_folder_path'] = ''
+prefs.defaults['openrouter_key'] = ''
 
 class ConfigWidget(QWidget):
     def __init__(self, plugin_action=None):
@@ -39,13 +40,24 @@ class ConfigWidget(QWidget):
         self.engine_label = QLabel('TTS Engine:')
         self.h1.addWidget(self.engine_label)
         self.engine_combo = QComboBox(self)
-        self.engine_combo.addItems(['Kokoro', 'Edge TTS', 'gTTS'])
+        self.engine_combo.addItems(['Kokoro', 'Kokoro Cloud', 'Edge TTS', 'gTTS'])
         self.engine_combo.setToolTip('Kokoro: most natural, runs offline on this computer (needs uv and ffmpeg).\n'
+                                     'Kokoro Cloud: same voice via OpenRouter, faster and saves battery (paid, needs ffmpeg).\n'
                                      'Edge TTS: Microsoft online voices. gTTS: Google, basic.')
         index = self.engine_combo.findText(prefs['tts_engine'])
         if index >= 0:
             self.engine_combo.setCurrentIndex(index)
         self.h1.addWidget(self.engine_combo)
+
+        # 2b. OpenRouter API key (Kokoro Cloud)
+        self.hk = QHBoxLayout()
+        self.l.addLayout(self.hk)
+        self.key_label = QLabel('OpenRouter API key:')
+        self.hk.addWidget(self.key_label)
+        self.key_edit = QLineEdit(prefs['openrouter_key'], self)
+        self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_edit.setPlaceholderText('sk-or-... (only for Kokoro Cloud)')
+        self.hk.addWidget(self.key_edit)
 
         # 3. Voice Gender Selection
         self.h2 = QHBoxLayout()
@@ -130,9 +142,11 @@ class ConfigWidget(QWidget):
         self.folder_button.setEnabled(is_external)
     
     def update_engine_ui(self, engine):
-        has_gender = engine in ('Kokoro', 'Edge TTS')
+        has_gender = engine in ('Kokoro', 'Kokoro Cloud', 'Edge TTS')
         self.gender_label.setEnabled(has_gender)
         self.gender_combo.setEnabled(has_gender)
+        self.key_label.setEnabled(engine == 'Kokoro Cloud')
+        self.key_edit.setEnabled(engine == 'Kokoro Cloud')
 
     def browse_folder(self):
         f = QFileDialog.getExistingDirectory(self, 'Select Unified Folder', self.folder_edit.text())
@@ -146,6 +160,7 @@ class ConfigWidget(QWidget):
     def save_settings(self):
         prefs['language'] = self.language_combo.currentText()
         prefs['tts_engine'] = self.engine_combo.currentText()
+        prefs['openrouter_key'] = self.key_edit.text().strip()
         prefs['voice_gender'] = self.gender_combo.currentText()
         prefs['output_format'] = self.format_combo.currentText()
         prefs['detect_language'] = self.detect_language_checkbox.isChecked()

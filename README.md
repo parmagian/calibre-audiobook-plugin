@@ -20,6 +20,7 @@ A Calibre plugin that generates high-quality audiobooks (M4B with chapters, or M
 
 - **Multiple TTS Engines**: 
   - **Kokoro** (Default): A natural-sounding open-source voice that runs offline on your computer. Needs [uv](https://docs.astral.sh/uv/) and [ffmpeg](https://ffmpeg.org/) (`brew install uv ffmpeg`). The first run downloads ~350 MB.
+  - **Kokoro Cloud**: The same Kokoro voice run on [OpenRouter](https://openrouter.ai/hexgrad/kokoro-82m) instead of your computer: faster and easier on the battery. Paid per character (well under $1 for a typical novel); paste your OpenRouter API key in the plugin settings. Needs ffmpeg.
   - **Edge TTS**: Uses Microsoft Edge's neural voices (needs internet).
   - **gTTS**: Google Text-to-Speech fallback.
 - **Expanded Language Support**: Support for English, Spanish (Latam & Spain), Portuguese, French, and Italian.

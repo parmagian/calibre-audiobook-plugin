@@ -32,7 +32,7 @@ VOICE_MAPPING = {
 }
 
 # Rough generation speed, for the time estimate
-CHARS_PER_MINUTE = {'Kokoro': 4000, 'Edge TTS': 40000, 'gTTS': 20000}
+CHARS_PER_MINUTE = {'Kokoro': 4000, 'Kokoro Cloud': 30000, 'Edge TTS': 40000, 'gTTS': 20000}
 
 # Global reference to the plugin instance for the config dialog
 _plugin_instance = None
@@ -153,14 +153,15 @@ class InterfacePlugin(InterfaceAction):
             temp_out = tf.name
 
         mapping = VOICE_MAPPING.get(language, VOICE_MAPPING['English'])
-        if engine == 'Kokoro':
+        if engine.startswith('Kokoro'):
             voice, lang_code = mapping['kokoro'][gender], mapping['kokoro_lang']
         else:
             voice, lang_code = mapping[gender], mapping['lang']
 
         mi = db.get_metadata(book_id)
         meta = {'title': mi.title, 'author': mi.authors[0] if mi.authors else '',
-                'cover': db.cover(book_id, as_path=True), 'helper_src': get_resources('kokoro_helper.py')}
+                'cover': db.cover(book_id, as_path=True), 'helper_src': get_resources('kokoro_helper.py'),
+                'api_key': prefs.get('openrouter_key', '').strip() or os.environ.get('OPENROUTER_API_KEY', '')}
 
         callback = Dispatcher(self.on_job_finished)
         job = ThreadedJob('audiobook_gen', f'Generating audiobook for "{title}"', worker_main,

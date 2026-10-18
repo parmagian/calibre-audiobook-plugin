@@ -56,6 +56,44 @@ def test_clean_text():
     assert 'Mr.' in worker.clean_text_for_tts('Mr. Smith', 'es')
 
 
+def test_kokoro_cloud():
+    import threading
+    import wave
+
+    class Q:
+        def put(self, x): pass
+
+    calls = []
+    def fake_speech(text, voice, key):
+        calls.append(text)
+        return b'\x01\x00' * 2400, 24000  # 0.1 s of audio per chunk
+    real = worker.openrouter_speech
+    worker.openrouter_speech = fake_speech
+    try:
+        chapters = [('One', 'First para. Second sentence.\n\nSecond para.'), ('Two', 'Only para.')]
+        with tempfile.TemporaryDirectory() as d:
+            parts, failed, err = worker.run_online_tts(chapters, 'af_heart', 'Kokoro Cloud', 'en-us', None, d,
+                                                       Q(), threading.Event(), lambda m: None, 'key')
+            assert failed == 0 and [t for _, t in parts] == ['One', 'Two'], (failed, err)
+            with wave.open(parts[0][0]) as w:
+                seconds = w.getnframes() / w.getframerate()
+            # 2 chunks + 2 paragraph pauses + chapter pause
+            assert abs(seconds - (0.2 + 2 * worker.PARAGRAPH_PAUSE + worker.CHAPTER_PAUSE)) < 0.01, seconds
+
+        # A bad key stops the job instead of retrying every chunk
+        def bad_key(*a):
+            raise worker.FatalTTSError('401')
+        worker.openrouter_speech = bad_key
+        with tempfile.TemporaryDirectory() as d:
+            parts, _, err = worker.run_online_tts(chapters, 'af_heart', 'Kokoro Cloud', 'en-us', None, d,
+                                                  Q(), threading.Event(), lambda m: None, 'key')
+            assert parts == [] and err == '401'
+        assert worker.run_online_tts(chapters, 'v', 'Kokoro Cloud', 'en', None, '.', Q(), threading.Event(),
+                                     lambda m: None, '')[2].startswith('No OpenRouter API key')
+    finally:
+        worker.openrouter_speech = real
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):
