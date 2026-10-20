@@ -144,6 +144,19 @@ def test_estimate():
     assert 'tomorrow' in late, late
 
 
+def test_learned_speed():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'stats.csv')
+        assert worker.learned_speed(path, 'Edge TTS') is None  # no file yet
+        worker.append_stats(path, {'engine': 'Edge TTS', 'status': 'success', 'characters': 201060, 'minutes_taken': 89.6})
+        worker.append_stats(path, {'engine': 'Edge TTS', 'status': 'failed', 'characters': 1000, 'minutes_taken': 0.1})
+        worker.append_stats(path, {'engine': 'Kokoro', 'status': 'success', 'characters': 40000, 'minutes_taken': ''})
+        assert round(worker.learned_speed(path, 'Edge TTS')) == 2244
+        assert worker.learned_speed(path, 'Kokoro') is None  # bad rows are skipped
+        text = worker.describe_estimate(201060, 'Edge TTS', speed=worker.learned_speed(path, 'Edge TTS'))
+        assert '~1.5 hours' in text and 'past audiobooks' in text, text
+
+
 def test_append_stats():
     import csv
     with tempfile.TemporaryDirectory() as d:

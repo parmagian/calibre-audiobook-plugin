@@ -53,7 +53,7 @@ def main(epub_path, output_path, voice, engine, lang_code, vendor_path, book_id,
         if not chapters:
             return False, (book_id, output_format, "Could not extract text.", None)
         chars = sum(len(t) for _, t in chapters)
-        est = estimate_job(chars, engine)
+        est = estimate_job(chars, engine, meta.get('speed'))
         stats.update(chapters=len(chapters), characters=chars, estimated_minutes=est['minutes'],
                      estimated_cost=round(est['cost_low'], 2))
         log(f"Chapters: {len(chapters)}, characters: {chars}")
@@ -662,19 +662,38 @@ def select_chapters(sections, book=None):
 # Gemini measured from a 934-character sample: $0.0154 (Flash), $0.0098 (Flash Lite).
 PRICE_PER_MILLION_CHARS = {'Kokoro': 0, 'Kokoro Cloud': 4.0, 'Gemini Flash': 16.5, 'Gemini Flash Lite': 10.5,
                            'Edge TTS': 0, 'gTTS': 0}
-# Rough generation speed in characters per minute (Kokoro Cloud: up to ~40 s per CLOUD_CHUNK_SIZE request,
-# CLOUD_CONCURRENCY at a time; OpenRouter's speed varies a lot)
+# Generation speed in characters per minute, used until the stats file has a real run for the engine.
+# Measured Oct 2026 on an M2 Pro: Kokoro 4140; Edge 2250 (Microsoft now streams near listening speed).
+# Kokoro Cloud: up to ~40 s per CLOUD_CHUNK_SIZE request; OpenRouter's speed varies a lot.
 CHARS_PER_MINUTE = {'Kokoro': 4000, 'Kokoro Cloud': 10000, 'Gemini Flash': 8000, 'Gemini Flash Lite': 8000,
-                    'Edge TTS': 40000, 'gTTS': 20000}
-SPOKEN_CHARS_PER_MINUTE = 850  # measured: ~850 characters make one minute of narration
+                    'Edge TTS': 2250, 'gTTS': 2000}
+SPOKEN_CHARS_PER_MINUTE = 950  # measured: Kokoro 934, Gemini 946, Edge 1034 characters per minute of narration
 COST_MARGIN = 1.10  # retried pieces and rounding can add a little
 
 
-def estimate_job(chars, engine):
+def learned_speed(stats_path, engine, last=5):
+    """Median characters per minute over this engine's last few finished runs in the stats file, or None."""
+    import csv
+    import statistics
+    speeds = []
+    try:
+        with open(stats_path, newline='', encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                try:
+                    if row['engine'] == engine and row['status'] in ('success', 'saved with gaps'):
+                        speeds.append(float(row['characters']) / float(row['minutes_taken']))
+                except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                    pass
+    except OSError:
+        return None
+    return statistics.median(speeds[-last:]) if speeds else None
+
+
+def estimate_job(chars, engine, speed=None):
     """Returns {'audio_hours', 'minutes', 'cost_low', 'cost_high'} for `chars` of book text."""
     cost = chars / 1e6 * PRICE_PER_MILLION_CHARS.get(engine, 0)
     return {'audio_hours': chars / SPOKEN_CHARS_PER_MINUTE / 60,
-            'minutes': max(1, round(chars / CHARS_PER_MINUTE.get(engine, 2000))),
+            'minutes': max(1, round(chars / (speed or CHARS_PER_MINUTE.get(engine, 2000)))),
             'cost_low': cost, 'cost_high': cost * COST_MARGIN}
 
 
@@ -692,15 +711,15 @@ def time_left(started, done, total, now=None):
     return f" - about {format_duration(elapsed / done * (total - done) / 60)} left"
 
 
-def describe_estimate(chars, engine, now=None):
-    """The estimate as a few lines for the confirm dialog."""
+def describe_estimate(chars, engine, now=None, speed=None):
+    """The estimate as a few lines for the confirm dialog. `speed` comes from learned_speed()."""
     import datetime
-    e = estimate_job(chars, engine)
+    e = estimate_job(chars, engine, speed)
     minutes = e['minutes']
     finish = (now or datetime.datetime.now()) + datetime.timedelta(minutes=minutes)
     day = '' if finish.date() == (now or datetime.datetime.now()).date() else ' tomorrow'
     clock = finish.strftime('%I:%M %p').lstrip('0')  # '%-I' isn't supported on Windows
-    took = f"{format_duration(minutes)} (done around {clock}{day})"
+    took = f"{format_duration(minutes)} (done around {clock}{day}{', from your past audiobooks' if speed else ''})"
     if e['cost_high'] == 0:
         cost = "Free" + (" (runs on this computer, uses battery)" if engine == 'Kokoro' else "")
     else:

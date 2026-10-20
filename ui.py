@@ -9,7 +9,7 @@ if vendor_path not in sys.path:
     sys.path.insert(0, vendor_path)
 
 from calibre.gui2.actions import InterfaceAction
-from calibre.gui2 import error_dialog, question_dialog, info_dialog, warning_dialog, Dispatcher
+from calibre.gui2 import error_dialog, info_dialog, warning_dialog, Dispatcher
 from calibre.gui2.threaded_jobs import ThreadedJob
 from calibre_plugins.audiobook_generator.config import prefs
 
@@ -113,54 +113,105 @@ class InterfacePlugin(InterfaceAction):
         book_id = ids[0]
         mi = db.get_metadata(book_id, index_is_id=True)
         title = mi.title
-        
-        language = prefs['language']
-        if prefs['detect_language'] and mi.languages:
-            l = mi.languages[0].lower()
-            if l.startswith('en') or l == 'eng':
-                language = 'English'
-            elif l.startswith('es') or l == 'spa':
-                # Map to Spain if specifically es-es or spa-es, else Latam
-                if l == 'es-es' or l == 'spa-es':
-                    language = 'Spanish (Spain)'
-                else:
-                    language = 'Spanish (Latam)'
-            elif l.startswith('pt') or l == 'por':
-                language = 'Portuguese'
-            elif l.startswith('fr') or l == 'fra' or l == 'fre':
-                language = 'French'
-            elif l.startswith('it') or l == 'ita':
-                language = 'Italian'
 
-        engine = prefs['tts_engine']
-        gender = prefs['voice_gender']
-        output_format = prefs['output_format']
-
+        # The book text doesn't change with the settings, so read it once
+        chars = chapter_count = None
         epub_path = db.new_api.format_abspath(book_id, 'EPUB')
-        est_message = ""
-
         if epub_path and os.path.exists(epub_path):
             try:
-                from calibre_plugins.audiobook_generator.worker import extract_chapters, describe_estimate
+                from calibre_plugins.audiobook_generator.worker import extract_chapters
                 author = mi.authors[0] if mi.authors else ''
                 chapters = extract_chapters(epub_path, 'en', {'title': title, 'author': author})
-                chars = sum(len(t) for _, t in chapters)
-                est_message = (f"{len(chapters)} chapters (front and back matter skipped).\n"
-                               + describe_estimate(chars, engine))
-            except:
-                est_message = "Estimation unavailable."
+                chars, chapter_count = sum(len(t) for _, t in chapters), len(chapters)
+            except Exception:
+                pass
 
-        msg = (f'\nDo you want to generate an {output_format} version of "{title}"?\n\n'
-               f'Engine: {engine} ({language}, {gender})\n'
-               f'{est_message}\n\n'
-               'The process runs in the background. You can monitor progress in the "Jobs" spinner.'
-               '\n' + '\n' * 6)
+        from qt.core import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
+        from calibre_plugins.audiobook_generator.config import ConfigWidget
+        from calibre_plugins.audiobook_generator.worker import describe_estimate, learned_speed
+        from html import escape
 
-        if question_dialog(self.gui, 'Generate Audiobook', msg):
-            self.start_background_job(book_id, title, language, engine, gender, output_format)
+        d = QDialog(self.gui)
+        d.setWindowTitle('Generate Audiobook')
+        layout = QVBoxLayout(d)
+        heading = QLabel(title, d)
+        heading.setTextFormat(Qt.TextFormat.PlainText)
+        font = heading.font()
+        font.setBold(True)
+        heading.setFont(font)
+        layout.addWidget(heading)
+        w = ConfigWidget(self)
+        layout.addWidget(w)
+        est = QLabel(d)
+        est.setTextFormat(Qt.TextFormat.RichText)
+        est.setWordWrap(True)
+        layout.addWidget(est)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, d)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Generate')
+        buttons.accepted.connect(d.accept)
+        buttons.rejected.connect(d.reject)
+        layout.addWidget(buttons)
+
+        def pick_language():
+            detected = self.book_language(mi) if w.detect_language_checkbox.isChecked() else None
+            return detected or w.language_combo.currentText()
+
+        def refresh(*args):
+            engine = w.engine_combo.currentText()
+            gender = w.gender_combo.currentText() if engine != 'gTTS' else 'default voice'
+            # (label, value, value color); mid-tone colors read on light and dark themes
+            rows = []
+            if chars is None:
+                rows.append(('Estimate', 'unavailable', None))
+            else:
+                # "Estimated cost: $1.07 to ..." -> {'Cost': '$1.07 to ...'}
+                est_rows = dict((label.replace('Estimated ', '').capitalize(), value.rstrip('.'))
+                                for label, value in (line.split(': ', 1)
+                                                     for line in describe_estimate(chars, engine, speed=learned_speed(STATS_PATH, engine)).splitlines()))
+                length, audio = est_rows['Book text'].split(', ', 1)
+                rows += [('Cost', est_rows['Cost'], '#2e9e5b'),
+                         ('Time to make', est_rows['Time to make'], '#e08a1e'),
+                         ('Book text', f'{audio[0].upper()}{audio[1:]}, {length}', None)]
+            rows.append(('Audiobook', f'{w.format_combo.currentText()} with {engine} ({pick_language()}, {gender})', None))
+            if chars is not None:
+                rows.append(('Chapters', f'{chapter_count} (front and back matter skipped)', None))
+            table = ''.join(f'<tr><td style="padding:2px 14px 2px 0; color:#4a8fe7"><b>{escape(k)}</b></td>'
+                            f'<td style="padding:2px 0{"; color:" + c + "; font-weight:bold" if c else ""}">'
+                            f'{escape(v)}</td></tr>' for k, v, c in rows)
+            est.setText(f'<hr><table>{table}</table>'
+                        '<p style="color:gray">It runs in the background. '
+                        'Watch progress in the "Jobs" spinner.</p>')
+
+        for combo in (w.format_combo, w.engine_combo, w.gender_combo, w.language_combo, w.storage_combo):
+            combo.currentIndexChanged.connect(refresh)
+        w.detect_language_checkbox.toggled.connect(refresh)
+        refresh()
+
+        if d.exec() != QDialog.DialogCode.Accepted:
+            return
+        w.save_settings()
+        self.start_background_job(book_id, title, pick_language(), prefs['tts_engine'],
+                                  prefs['voice_gender'], prefs['output_format'])
+
+    def book_language(self, mi):
+        if not mi.languages:
+            return None
+        l = mi.languages[0].lower()
+        if l.startswith('en') or l == 'eng':
+            return 'English'
+        if l.startswith('es') or l == 'spa':
+            # Map to Spain if specifically es-es or spa-es, else Latam
+            return 'Spanish (Spain)' if l in ('es-es', 'spa-es') else 'Spanish (Latam)'
+        if l.startswith('pt') or l == 'por':
+            return 'Portuguese'
+        if l.startswith('fr') or l in ('fra', 'fre'):
+            return 'French'
+        if l.startswith('it') or l == 'ita':
+            return 'Italian'
+        return None
 
     def start_background_job(self, book_id, title, language, engine, gender, output_format):
-        from calibre_plugins.audiobook_generator.worker import main as worker_main
+        from calibre_plugins.audiobook_generator.worker import main as worker_main, learned_speed
         db = self.gui.current_db.new_api
         epub_path = db.format_abspath(book_id, 'EPUB')
         if not epub_path:
@@ -182,7 +233,7 @@ class InterfacePlugin(InterfaceAction):
         meta = {'title': mi.title, 'author': mi.authors[0] if mi.authors else '',
                 'cover': db.cover(book_id, as_path=True), 'helper_src': get_resources('kokoro_helper.py'),
                 'api_key': prefs.get('openrouter_key', '').strip() or os.environ.get('OPENROUTER_API_KEY', ''),
-                'stats': {}}
+                'stats': {}, 'speed': learned_speed(STATS_PATH, engine)}
 
         callback = Dispatcher(self.on_job_finished)
         job = ThreadedJob('audiobook_gen', f'Generating audiobook for "{title}"', worker_main,
